@@ -734,6 +734,7 @@ namespace Opc.Ua
             m_trustedPeerCertificates = new CertificateTrustList();
             m_nonceLength = 32;
             m_autoAcceptUntrustedCertificates = false;
+            m_rejectSHA1SignedCertificates = CertificateFactory.DefaultHashSize >= 256;
         }
 
         /// <summary>
@@ -876,6 +877,16 @@ namespace Opc.Ua
             get { return m_suppressNonceValidationErrors; }
             set { m_suppressNonceValidationErrors = value; }
         }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether SHA1 signed certificates should be rejected.
+        /// </summary>
+        [DataMember(IsRequired = false, EmitDefaultValue = false, Order = 11)]
+        public bool RejectSHA1SignedCertificates
+        {
+            get { return m_rejectSHA1SignedCertificates; }
+            set { m_rejectSHA1SignedCertificates = value; }
+        }
         #endregion
 
         #region Private Fields
@@ -885,6 +896,7 @@ namespace Opc.Ua
         private int m_nonceLength;
         private CertificateStoreIdentifier m_rejectedCertificateStore;
         private bool m_autoAcceptUntrustedCertificates;
+        private bool m_rejectSHA1SignedCertificates;
         private bool m_configureFirewall;
         private string m_userRoleDirectory;
         private bool m_suppressNonceValidationErrors;

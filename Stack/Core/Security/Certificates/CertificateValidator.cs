@@ -181,6 +181,10 @@ namespace Opc.Ua
                 {
                     m_autoAcceptUntrustedCertificates = configuration.AutoAcceptUntrustedCertificates;
                 }
+                if ((m_protectFlags & ProtectFlags.RejectSHA1SignedCertificates) == 0)
+                {
+                    m_rejectSHA1SignedCertificates = configuration.RejectSHA1SignedCertificates;
+                }
             }
 
             if (configuration.ApplicationCertificate != null)
