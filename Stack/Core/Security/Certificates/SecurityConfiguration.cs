@@ -51,6 +51,12 @@ namespace Opc.Ua
             TrustedIssuerCertificates = CreateDefaultTrustList(TrustedIssuerCertificates);
             TrustedPeerCertificates = CreateDefaultTrustList(TrustedPeerCertificates);
 
+            if (!String.Equals(m_certificateSignatureAlgorithm, "SHA1", StringComparison.OrdinalIgnoreCase) &&
+                !String.Equals(m_certificateSignatureAlgorithm, "SHA256", StringComparison.OrdinalIgnoreCase))
+            {
+                throw ServiceResultException.Create(StatusCodes.BadConfigurationError, "CertificateSignatureAlgorithm must be 'SHA1' or 'SHA256'.");
+            }
+
             //set a default rejected certificate store.
             if (RejectedCertificateStore == null)
             {

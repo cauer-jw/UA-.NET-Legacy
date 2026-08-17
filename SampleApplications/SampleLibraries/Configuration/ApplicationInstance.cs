@@ -1602,15 +1602,27 @@ namespace Opc.Ua.Configuration
                 Utils.GetAbsoluteDirectoryPath(id.StorePath, true, true, true);
             }
 
+            string signatureAlgorithmName = configuration.SecurityConfiguration.CertificateSignatureAlgorithm;
+            ushort signatureAlgorithm = (String.Equals(signatureAlgorithmName, "SHA256", StringComparison.OrdinalIgnoreCase)) ? (ushort)1 : (ushort)0;
+            ushort hashSizeInBits = (signatureAlgorithm == 1) ? (ushort)256 : (ushort)160;
+
             X509Certificate2 certificate = Opc.Ua.CertificateFactory.CreateCertificate(
                 id.StoreType,
                 id.StorePath,
+                null,
                 configuration.ApplicationUri,
                 configuration.ApplicationName,
                 null,
                 serverDomainNames,
                 keySize,
-                lifetimeInMonths);
+                DateTime.MinValue,
+                lifetimeInMonths,
+                hashSizeInBits,
+                false,
+                false,
+                null,
+                null,
+                signatureAlgorithm);
 
             id.Certificate = certificate;
             AddToTrustedStore(configuration, certificate);
@@ -1849,8 +1861,8 @@ namespace Opc.Ua.Configuration
                     if (certificate2 != null)
                     {
                         return;
-                    } 
-                    
+                    }
+
                     Utils.Trace(Utils.TraceMasks.Information, "Adding certificate to trusted peer store. StorePath={0}", storePath);
 
                     List<string> subjectName = Utils.ParseDistinguishedName(certificate.Subject);

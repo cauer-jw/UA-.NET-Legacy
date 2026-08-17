@@ -37,6 +37,7 @@
     </RejectedCertificateStore>
     <AutoAcceptUntrustedCertificates>false</AutoAcceptUntrustedCertificates>
     <RejectSHA1SignedCertificates>false</RejectSHA1SignedCertificates>
+    <CertificateSignatureAlgorithm>SHA256</CertificateSignatureAlgorithm>
   </SecurityConfiguration>
   
   <TransportConfigurations />

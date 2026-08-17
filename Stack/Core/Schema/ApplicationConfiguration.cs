@@ -735,6 +735,7 @@ namespace Opc.Ua
             m_nonceLength = 32;
             m_autoAcceptUntrustedCertificates = false;
             m_rejectSHA1SignedCertificates = CertificateFactory.DefaultHashSize >= 256;
+            m_certificateSignatureAlgorithm = "SHA1";
         }
 
         /// <summary>
@@ -887,6 +888,17 @@ namespace Opc.Ua
             get { return m_rejectSHA1SignedCertificates; }
             set { m_rejectSHA1SignedCertificates = value; }
         }
+
+        /// <summary>
+        /// Gets or sets the signature algorithm used when creating a new application certificate.
+        /// Allowed values: SHA1 or SHA256.
+        /// </summary>
+        [DataMember(IsRequired = false, EmitDefaultValue = false, Order = 12)]
+        public string CertificateSignatureAlgorithm
+        {
+            get { return m_certificateSignatureAlgorithm; }
+            set { m_certificateSignatureAlgorithm = value; }
+        }
         #endregion
 
         #region Private Fields
@@ -897,6 +909,7 @@ namespace Opc.Ua
         private CertificateStoreIdentifier m_rejectedCertificateStore;
         private bool m_autoAcceptUntrustedCertificates;
         private bool m_rejectSHA1SignedCertificates;
+        private string m_certificateSignatureAlgorithm;
         private bool m_configureFirewall;
         private string m_userRoleDirectory;
         private bool m_suppressNonceValidationErrors;
