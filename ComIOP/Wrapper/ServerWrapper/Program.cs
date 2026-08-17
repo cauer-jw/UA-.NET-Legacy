@@ -34,6 +34,8 @@ namespace Opc.Ua.Com.Client
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            Environment.CurrentDirectory = AppDomain.CurrentDomain.BaseDirectory;
+
             ApplicationInstance application = new ApplicationInstance();
             application.ApplicationName   = "UA COM Server Wrapper";
             application.ApplicationType   = ApplicationType.Server;
