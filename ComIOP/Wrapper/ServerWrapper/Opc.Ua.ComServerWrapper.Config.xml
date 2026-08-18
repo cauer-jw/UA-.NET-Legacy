@@ -36,7 +36,7 @@
       <StorePath>%CommonApplicationData%\OPC Foundation\CertificateStores\RejectedCertificates</StorePath>
     </RejectedCertificateStore>
     <AutoAcceptUntrustedCertificates>false</AutoAcceptUntrustedCertificates>
-    <RejectSHA1SignedCertificates>false</RejectSHA1SignedCertificates>
+    <RejectSHA1SignedCertificates>true</RejectSHA1SignedCertificates>
     <CertificateSignatureAlgorithm>SHA256</CertificateSignatureAlgorithm>
   </SecurityConfiguration>
   

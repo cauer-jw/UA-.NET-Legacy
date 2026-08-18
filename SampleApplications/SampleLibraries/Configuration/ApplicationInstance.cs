@@ -2107,6 +2107,32 @@ namespace Opc.Ua.Configuration
                 }               
             }
 
+            // ensure LocalSystem can always run the service even when custom rules are provided.
+            if (InstallConfig.InstallAsService)
+            {
+                bool hasLocalSystem = false;
+
+                foreach (ApplicationAccessRule existingRule in rules)
+                {
+                    if (existingRule.RuleType == AccessControlType.Allow
+                        && existingRule.Right == ApplicationAccessRight.Run
+                        && existingRule.IdentityName == WellKnownSids.LocalSystem)
+                    {
+                        hasLocalSystem = true;
+                        break;
+                    }
+                }
+
+                if (!hasLocalSystem)
+                {
+                    ApplicationAccessRule rule = new ApplicationAccessRule();
+                    rule.RuleType = AccessControlType.Allow;
+                    rule.Right = ApplicationAccessRight.Run;
+                    rule.IdentityName = WellKnownSids.LocalSystem;
+                    rules.Add(rule);
+                }
+            }
+
             // ensure someone can change the configuration later.
             if (!hasAdmin)
             {

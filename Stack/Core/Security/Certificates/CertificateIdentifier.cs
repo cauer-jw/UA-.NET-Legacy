@@ -386,12 +386,20 @@ namespace Opc.Ua
                 {
                     if (!needPrivateKey || certificate.HasPrivateKey)
                     {
-                        // FindBySubjectName can return broad matches; ensure the certificate subject
-                        // actually contains the requested subject name before accepting it.
-                        if (String.IsNullOrEmpty(certificate.Subject) ||
-                            certificate.Subject.IndexOf(subjectName, StringComparison.OrdinalIgnoreCase) < 0)
+                        if (subjectName2.Count > 0)
                         {
-                            continue;
+                            // Use structured DN comparison to prevent partial-name false positives.
+                            if (!Utils.CompareDistinguishedName(certificate, subjectName2))
+                                continue;
+                        }
+                        else
+                        {
+                            // Fallback for non-DN names: reject empty subjects and non-matching substrings.
+                            if (String.IsNullOrEmpty(certificate.Subject) ||
+                                certificate.Subject.IndexOf(subjectName, StringComparison.OrdinalIgnoreCase) < 0)
+                            {
+                                continue;
+                            }
                         }
 
                         return certificate;

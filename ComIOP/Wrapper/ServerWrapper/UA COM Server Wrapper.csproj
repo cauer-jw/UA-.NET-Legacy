@@ -186,7 +186,6 @@
     <ItemGroup>
       <_DeploymentRuntimeReferences Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll' or '%(ReferenceCopyLocalPaths.Extension)' == '.exe'" />
       <_DeploymentReferenceDirectories Include="@(_DeploymentRuntimeReferences->'$(DeploymentDir)%(DestinationSubDirectory)')" />
-      <_DeploymentRuntimeOutputDlls Include="$(TargetDir)*.dll" />
       <_DeploymentContent Include="@(ContentWithTargetPath)" Condition="'%(ContentWithTargetPath.CopyToOutputDirectory)' != '' and '%(ContentWithTargetPath.TargetPath)' != 'Opc.Ua.ComServerWrapper.Config.xml'" />
       <_DeploymentSymbols Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
       <_DeploymentSymbols Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.pdb'" />
@@ -202,10 +201,6 @@
           DestinationFiles="@(_DeploymentRuntimeReferences->'$(DeploymentDir)%(DestinationSubDirectory)%(Filename)%(Extension)')"
           SkipUnchangedFiles="false"
           Condition="'@(_DeploymentRuntimeReferences)' != ''" />
-        <Copy SourceFiles="@(_DeploymentRuntimeOutputDlls)"
-          DestinationFiles="@(_DeploymentRuntimeOutputDlls->'$(DeploymentDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="false"
-          Condition="'@(_DeploymentRuntimeOutputDlls)' != ''" />
     <Copy SourceFiles="@(_DeploymentContent->'$(TargetDir)%(TargetPath)')"
           DestinationFiles="@(_DeploymentContent->'$(DeploymentDir)%(TargetPath)')"
           SkipUnchangedFiles="false"

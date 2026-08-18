@@ -735,7 +735,7 @@ namespace Opc.Ua
             m_nonceLength = 32;
             m_autoAcceptUntrustedCertificates = false;
             m_rejectSHA1SignedCertificates = CertificateFactory.DefaultHashSize >= 256;
-            m_certificateSignatureAlgorithm = "SHA1";
+            m_certificateSignatureAlgorithm = "SHA256";
         }
 
         /// <summary>
