@@ -337,7 +337,15 @@ namespace Opc.Ua
 
                         List<string> subjectName2 = Utils.ParseDistinguishedName(subjectName);
 
-                        if (Utils.CompareDistinguishedName(certificate, subjectName2))
+                        if (subjectName2.Count == 0)
+                        {
+                            if (!String.IsNullOrEmpty(certificate.Subject) &&
+                                certificate.Subject.IndexOf(subjectName, StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                return certificate;
+                            }
+                        }
+                        else if (Utils.CompareDistinguishedName(certificate, subjectName2))
                         {
                             return certificate;
                         }
@@ -353,12 +361,22 @@ namespace Opc.Ua
 
                 foreach (X509Certificate2 certificate in collection)
                 {
-                    if (Utils.CompareDistinguishedName(certificate, subjectName2))
+                    if (subjectName2.Count == 0)
                     {
-                        if (!needPrivateKey || certificate.HasPrivateKey)
+                        if (String.IsNullOrEmpty(certificate.Subject) ||
+                            certificate.Subject.IndexOf(subjectName, StringComparison.OrdinalIgnoreCase) < 0)
                         {
-                            return certificate;
+                            continue;
                         }
+                    }
+                    else if (!Utils.CompareDistinguishedName(certificate, subjectName2))
+                    {
+                        continue;
+                    }
+
+                    if (!needPrivateKey || certificate.HasPrivateKey)
+                    {
+                        return certificate;
                     }
                 }
 
@@ -368,6 +386,14 @@ namespace Opc.Ua
                 {
                     if (!needPrivateKey || certificate.HasPrivateKey)
                     {
+                        // FindBySubjectName can return broad matches; ensure the certificate subject
+                        // actually contains the requested subject name before accepting it.
+                        if (String.IsNullOrEmpty(certificate.Subject) ||
+                            certificate.Subject.IndexOf(subjectName, StringComparison.OrdinalIgnoreCase) < 0)
+                        {
+                            continue;
+                        }
+
                         return certificate;
                     }
                 }

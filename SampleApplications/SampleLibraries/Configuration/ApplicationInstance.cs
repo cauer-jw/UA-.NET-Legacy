@@ -811,10 +811,17 @@ namespace Opc.Ua.Configuration
 
             if (InstallConfig.ApplicationCertificate != null)
             {
-                configuration.SecurityConfiguration.ApplicationCertificate.StoreType = InstallConfig.ApplicationCertificate.StoreType;
-                configuration.SecurityConfiguration.ApplicationCertificate.StorePath = InstallConfig.ApplicationCertificate.StorePath;
+                if (!String.IsNullOrEmpty(InstallConfig.ApplicationCertificate.StoreType))
+                {
+                    configuration.SecurityConfiguration.ApplicationCertificate.StoreType = InstallConfig.ApplicationCertificate.StoreType;
+                }
 
-                if (String.IsNullOrEmpty(InstallConfig.ApplicationCertificate.SubjectName))
+                if (!String.IsNullOrEmpty(InstallConfig.ApplicationCertificate.StorePath))
+                {
+                    configuration.SecurityConfiguration.ApplicationCertificate.StorePath = InstallConfig.ApplicationCertificate.StorePath;
+                }
+
+                if (!String.IsNullOrEmpty(InstallConfig.ApplicationCertificate.SubjectName))
                 {
                     configuration.SecurityConfiguration.ApplicationCertificate.SubjectName = InstallConfig.ApplicationCertificate.SubjectName;
                 }
@@ -926,17 +933,10 @@ namespace Opc.Ua.Configuration
 
             try
             {
-                // ensure the RawData does not get serialized.
-                certificate = configuration.SecurityConfiguration.ApplicationCertificate.Certificate;
-
-                configuration.SecurityConfiguration.ApplicationCertificate.Certificate = null;
                 configuration.SecurityConfiguration.ApplicationCertificate.SubjectName = certificate.Subject;
                 configuration.SecurityConfiguration.ApplicationCertificate.Thumbprint  = certificate.Thumbprint;
 
-                configuration.SaveToFile(configuration.SourceFilePath);
-                
-                // restore the configuration.
-                configuration.SecurityConfiguration.ApplicationCertificate.Certificate = certificate;
+                UpdateApplicationCertificateReference(configuration.SourceFilePath, certificate);
             }
             catch (Exception e)
             {
@@ -1342,6 +1342,10 @@ namespace Opc.Ua.Configuration
 
             Utils.Trace(Utils.TraceMasks.Information, "Checking application instance certificate. {0}", certificate.Subject);
 
+            // Keep validator behavior aligned with the loaded security configuration.
+            configuration.CertificateValidator.RejectSHA1SignedCertificates =
+                configuration.SecurityConfiguration.RejectSHA1SignedCertificates;
+
             // validate certificate.
             configuration.CertificateValidator.Validate(certificate);
 
@@ -1566,6 +1570,72 @@ namespace Opc.Ua.Configuration
             catch (Exception e)
             {
                 Utils.Trace(e, "Unexpected error while checking or changing the firewall configuration.");
+            }
+        }
+
+        /// <summary>
+        /// Updates only the application certificate reference in the configuration file.
+        /// </summary>
+        /// <param name="filePath">The configuration file to update.</param>
+        /// <param name="certificate">The application certificate to reference.</param>
+        private static void UpdateApplicationCertificateReference(string filePath, X509Certificate2 certificate)
+        {
+            if (String.IsNullOrEmpty(filePath) || certificate == null)
+            {
+                return;
+            }
+
+            XmlDocument document = new XmlDocument();
+            document.PreserveWhitespace = true;
+            document.Load(filePath);
+
+            string namespaceUri = document.DocumentElement.NamespaceURI;
+
+            XmlNamespaceManager namespaceManager = new XmlNamespaceManager(document.NameTable);
+            namespaceManager.AddNamespace("u", namespaceUri);
+
+            XmlElement securityConfiguration = document.SelectSingleNode("/u:ApplicationConfiguration/u:SecurityConfiguration", namespaceManager) as XmlElement;
+
+            if (securityConfiguration == null)
+            {
+                throw ServiceResultException.Create(StatusCodes.BadConfigurationError, "SecurityConfiguration is missing in configuration file: {0}", filePath);
+            }
+
+            XmlElement applicationCertificate = securityConfiguration.SelectSingleNode("u:ApplicationCertificate", namespaceManager) as XmlElement;
+
+            if (applicationCertificate == null)
+            {
+                applicationCertificate = document.CreateElement("ApplicationCertificate", namespaceUri);
+                securityConfiguration.PrependChild(applicationCertificate);
+            }
+
+            SetChildElementText(document, applicationCertificate, namespaceUri, "SubjectName", certificate.Subject);
+            SetChildElementText(document, applicationCertificate, namespaceUri, "Thumbprint", certificate.Thumbprint);
+            RemoveChildElement(applicationCertificate, namespaceUri, "RawData");
+
+            document.Save(filePath);
+        }
+
+        private static void SetChildElementText(XmlDocument document, XmlElement parent, string namespaceUri, string name, string value)
+        {
+            XmlElement element = parent.SelectSingleNode("*[local-name()='" + name + "' and namespace-uri()='" + namespaceUri + "']") as XmlElement;
+
+            if (element == null)
+            {
+                element = document.CreateElement(name, namespaceUri);
+                parent.AppendChild(element);
+            }
+
+            element.InnerText = value ?? String.Empty;
+        }
+
+        private static void RemoveChildElement(XmlElement parent, string namespaceUri, string name)
+        {
+            XmlElement element = parent.SelectSingleNode("*[local-name()='" + name + "' and namespace-uri()='" + namespaceUri + "']") as XmlElement;
+
+            if (element != null)
+            {
+                parent.RemoveChild(element);
             }
         }
 
@@ -2017,6 +2087,12 @@ namespace Opc.Ua.Configuration
                 // ensure service can access.
                 if (InstallConfig.InstallAsService)
                 {
+                    rule = new ApplicationAccessRule();
+                    rule.RuleType = AccessControlType.Allow;
+                    rule.Right = ApplicationAccessRight.Run;
+                    rule.IdentityName = WellKnownSids.LocalSystem;
+                    rules.Add(rule);
+
                     rule = new ApplicationAccessRule();
                     rule.RuleType = AccessControlType.Allow;
                     rule.Right = ApplicationAccessRight.Run;

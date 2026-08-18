@@ -36,7 +36,7 @@ namespace Opc.Ua.Com.Client
 
             Environment.CurrentDirectory = AppDomain.CurrentDomain.BaseDirectory;
 
-            ApplicationInstance application = new ApplicationInstance();
+            ApplicationInstance application = new ComServerWrapperApplication();
             application.ApplicationName   = "UA COM Server Wrapper";
             application.ApplicationType   = ApplicationType.Server;
             application.ConfigSectionName = "Opc.Ua.ComServerWrapper";
