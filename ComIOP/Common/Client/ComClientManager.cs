@@ -331,8 +331,10 @@ namespace Opc.Ua.Com.Client
                 // fetches the status from the server and updates the status node. 
                 if (UpdateStatus())
                 {
-                    AvailableLocaleIds = m_defaultClient.QueryAvailableLocales();
+                    // update the timestamp before QueryAvailableLocales so a hanging call
+                    // does not cause the status timer to trigger another reconnect.
                     m_lastStatusUpdate = DateTime.UtcNow;
+                    AvailableLocaleIds = m_defaultClient.QueryAvailableLocales();
 
                     if (reconnected && m_reconnectCallback != null)
                     {

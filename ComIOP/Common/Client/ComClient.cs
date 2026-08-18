@@ -156,7 +156,7 @@ namespace Opc.Ua.Com.Client
 
             try
             {
-                IOPCSecurityPrivate server = BeginComCall<IOPCSecurityPrivate>(methodName, true);
+                IOPCSecurityPrivate server = BeginComCall<IOPCSecurityPrivate>(methodName, false);
 
                 if (server != null)
                 {

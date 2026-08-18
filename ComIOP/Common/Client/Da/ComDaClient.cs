@@ -1628,6 +1628,13 @@ namespace Opc.Ua.Com.Client
                     // fetch the item id.
                     string itemId = m_clone.GetItemId(name);
 
+                    // stop browsing gracefully if the original client was replaced during a reconnect.
+                    if (m_client.Disposed)
+                    {
+                        m_completed = true;
+                        return null;
+                    }
+
                     // fetch the metadata.
                     element = m_client.FindElement(itemId, name, m_itemId);
                 }
