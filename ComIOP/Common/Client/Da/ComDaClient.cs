@@ -31,13 +31,9 @@ namespace Opc.Ua.Com.Client
     public class ComDaClient : ComClient
     {
         #region Constructors
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ComDaClient"/> class.
-        /// </summary>
-        /// <param name="configuration"></param>
         public ComDaClient(ComDaClientConfiguration configuration) : base(configuration)
         {
-            m_cache = new Dictionary<string, DaElement>();
+            m_cache = GetSharedCache(configuration.ServerUrl);
             m_configuration = configuration;
         }
         #endregion
@@ -236,13 +232,126 @@ namespace Opc.Ua.Com.Client
         /// <returns>The browser object.</returns>
         public IDaElementBrowser CreateBrowser(string itemId)
         {
-            // check if DA3 browse interface is supported.
             if (SupportsInterface<IOPCBrowse>())
             {
-                return new Da20ElementBrowser(this, itemId, m_configuration.BrowseToNotSupported);
+                return new Da30ElementBrowser(this, itemId);
             }
 
             return new Da20ElementBrowser(this, itemId, m_configuration.BrowseToNotSupported);
+        }
+
+        internal struct Da30BrowseResult
+        {
+            public string Name;
+            public string ItemId;
+            public bool HasChildren;
+        }
+
+        // Calls IOPCBrowse.Browse and returns all elements at itemId level with item IDs already resolved.
+        internal List<Da30BrowseResult> FetchDa30BrowseResults(string itemId)
+        {
+            var results = new List<Da30BrowseResult>();
+            string methodName = "IOPCBrowse.Browse";
+            string continuationPoint = String.Empty;
+
+            try
+            {
+                IOPCBrowse server = BeginComCall<IOPCBrowse>(methodName, false);
+
+                if (server == null)
+                {
+                    return results;
+                }
+
+                do
+                {
+                    int moreElements;
+                    int count;
+                    IntPtr pElements;
+
+                    server.Browse(
+                        itemId ?? String.Empty,
+                        ref continuationPoint,
+                        0,
+                        OPCBROWSEFILTER.OPC_BROWSE_FILTER_ALL,
+                        String.Empty,
+                        String.Empty,
+                        0, 0, 0, new int[0],
+                        out moreElements,
+                        out count,
+                        out pElements);
+
+                    if (pElements != IntPtr.Zero && count > 0)
+                    {
+                        ParseBrowseElements(pElements, count, results);
+                    }
+
+                    Utils.Trace(Utils.TraceMasks.ExternalSystem, "IOPCBrowse.Browse Level='{0}' -> {1} elements.", String.IsNullOrEmpty(itemId) ? "(root)" : itemId, results.Count);
+
+                    if (results.Count > 0)
+                    {
+                        // Log first item ID to confirm szItemID format (helps diagnose path-separator mismatches).
+                        Utils.Trace(Utils.TraceMasks.ExternalSystem, "IOPCBrowse.Browse SampleItemId='{0}'", results[0].ItemId);
+                    }
+
+                    if (moreElements == 0)
+                    {
+                        break;
+                    }
+                }
+                while (true);
+            }
+            catch (Exception e)
+            {
+                ComCallError(methodName, e);
+            }
+            finally
+            {
+                EndComCall(methodName);
+            }
+
+            return results;
+        }
+
+        private static void ParseBrowseElements(IntPtr pElements, int count, List<Da30BrowseResult> results)
+        {
+            const int OPC_BROWSE_HASCHILDREN = 0x1;
+            int elementSize = Marshal.SizeOf(typeof(OPCBROWSEELEMENT));
+            IntPtr pos = pElements;
+
+            try
+            {
+                for (int i = 0; i < count; i++, pos = IntPtr.Add(pos, elementSize))
+                {
+                    OPCBROWSEELEMENT el = (OPCBROWSEELEMENT)Marshal.PtrToStructure(pos, typeof(OPCBROWSEELEMENT));
+
+                    if (el.ItemProperties.pItemProperties != IntPtr.Zero)
+                    {
+                        Marshal.FreeCoTaskMem(el.ItemProperties.pItemProperties);
+                    }
+
+                    if (!String.IsNullOrEmpty(el.szItemID))
+                    {
+                        results.Add(new Da30BrowseResult
+                        {
+                            Name        = el.szName ?? el.szItemID,
+                            ItemId      = el.szItemID,
+                            HasChildren = (el.dwFlagValue & OPC_BROWSE_HASCHILDREN) != 0
+                        });
+                    }
+                }
+            }
+            finally
+            {
+                pos = pElements;
+
+                for (int i = 0; i < count; i++, pos = IntPtr.Add(pos, elementSize))
+                {
+                    Marshal.DestroyStructure(pos, typeof(OPCBROWSEELEMENT));
+                }
+
+                Marshal.FreeCoTaskMem(pElements);
+            }
         }
 
         /// <summary>
@@ -524,9 +633,85 @@ namespace Opc.Ua.Com.Client
         /// <param name="element">The element.</param>
         private void SaveElementInCache(DaElement element)
         {
+            bool isNew;
             lock (m_cache)
             {
+                isNew = !m_cache.ContainsKey(element.ItemId);
                 m_cache[element.ItemId] = element;
+            }
+
+            // Debounced: save cache file 10 s after the last new item arrives.
+            if (isNew)
+            {
+                m_lastNewCacheItem = DateTime.UtcNow;
+                if (!m_pendingCacheSave)
+                {
+                    m_pendingCacheSave = true;
+                    System.Threading.ThreadPool.QueueUserWorkItem(_ => DebouncedSaveCacheFile());
+                }
+            }
+        }
+
+        private void DebouncedSaveCacheFile()
+        {
+            // Wait until no new item has arrived for 10 seconds (or service is shutting down).
+            while (!Disposed && (DateTime.UtcNow - m_lastNewCacheItem).TotalSeconds < 10)
+            {
+                System.Threading.Thread.Sleep(1000);
+            }
+            m_pendingCacheSave = false;
+            SaveCacheFile();
+        }
+
+        private static Dictionary<string, DaElement> GetSharedCache(string serverUrl)
+        {
+            string key = serverUrl ?? String.Empty;
+            lock (s_sharedCaches)
+            {
+                Dictionary<string, DaElement> cache;
+                if (!s_sharedCaches.TryGetValue(key, out cache))
+                {
+                    cache = new Dictionary<string, DaElement>();
+                    s_sharedCaches[key] = cache;
+                }
+                return cache;
+            }
+        }
+
+        private string GetCacheFilePath()
+        {
+            string tag = (m_configuration.ServerUrl ?? "default").GetHashCode().ToString("X8");
+            return "Opc.Ua.ItemCache." + tag + ".txt";
+        }
+
+        private void SaveCacheFile()
+        {
+            try
+            {
+                string filePath = GetCacheFilePath();
+
+                // Merge with existing file so multiple client instances accumulate entries.
+                var merged = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+                if (System.IO.File.Exists(filePath))
+                {
+                    foreach (string line in System.IO.File.ReadAllLines(filePath))
+                        if (!String.IsNullOrEmpty(line))
+                            merged.Add(line);
+                }
+
+                lock (m_cache)
+                {
+                    foreach (System.Collections.Generic.KeyValuePair<string, DaElement> kv in m_cache)
+                        if (kv.Value != null && kv.Value.ElementType != DaElementType.Branch)
+                            merged.Add(kv.Key);
+                }
+
+                System.IO.File.WriteAllLines(filePath, merged);
+                Utils.Trace("SaveCacheFile: {0} item IDs saved.", merged.Count);
+            }
+            catch (Exception e)
+            {
+                Utils.Trace(e, "SaveCacheFile failed.");
             }
         }
 
@@ -1383,6 +1568,204 @@ namespace Opc.Ua.Com.Client
         protected override void OnConnected()
         {
             m_supportsIOPCItemIO = SupportsInterface<IOPCItemIO>();
+
+            // Pre-warm the element cache so the first client connection needs no GetItemProperties calls.
+            if (SupportsInterface<IOPCBrowse>())
+            {
+                string serverUrl = m_configuration.ServerUrl ?? String.Empty;
+                bool alreadyWarming;
+                lock (s_warmUpGuard)
+                {
+                    alreadyWarming = s_warmUpGuard.Contains(serverUrl);
+                    if (!alreadyWarming) s_warmUpGuard.Add(serverUrl);
+                }
+                if (!alreadyWarming)
+                {
+                    System.Threading.ThreadPool.QueueUserWorkItem(_ => WarmElementCache());
+                }
+            }
+        }
+
+        private void WarmElementCache()
+        {
+            try
+            {
+                // Restore previously discovered item IDs from disk.
+                string cacheFile = GetCacheFilePath();
+                if (System.IO.File.Exists(cacheFile))
+                {
+                    string[] ids = System.IO.File.ReadAllLines(cacheFile);
+                    Utils.Trace("WarmElementCache: loading {0} items from cache file.", ids.Length);
+                    string browseName;
+                    foreach (string id in ids)
+                    {
+                        if (Disposed) return;
+                        // Skip branch-type entries (namespace prefixes like \SYM:, SERVER:).
+                        if (String.IsNullOrEmpty(id) || id[0] == '\\' || !id.Contains(".")) continue;
+                        m_configuration.ItemIdParser.Parse(this, m_configuration, id, out browseName);
+                        FindElement(id, browseName ?? id, String.Empty);
+                    }
+                }
+
+                // Also browse the root level to pick up any new top-level items.
+                List<Da30BrowseResult> roots = FetchDa30BrowseResults(String.Empty);
+                Utils.Trace("WarmElementCache: {0} root items from Browse.", roots.Count);
+                foreach (Da30BrowseResult r in roots)
+                {
+                    if (Disposed) return;
+                    if (!String.IsNullOrEmpty(r.ItemId))
+                        FindElement(r.ItemId, r.Name, String.Empty);
+                }
+
+                Utils.Trace("WarmElementCache: done.");
+            }
+            catch (Exception e)
+            {
+                Utils.Trace(e, "WarmElementCache failed.");
+            }
+            finally
+            {
+                string serverUrl = m_configuration.ServerUrl ?? String.Empty;
+                lock (s_warmUpGuard) { s_warmUpGuard.Remove(serverUrl); }
+            }
+        }
+        #endregion
+
+        #region Da30ElementBrowser Class
+        // Uses IOPCBrowse (DA 3.0) to enumerate elements; item IDs are returned directly, eliminating GetItemID calls.
+        private class Da30ElementBrowser : IDaElementBrowser
+        {
+            private readonly ComDaClient m_client;
+            private readonly string m_itemId;
+            private Queue<Da30BrowseResult> m_queue;
+            private bool m_completed;
+
+            internal Da30ElementBrowser(ComDaClient client, string itemId)
+            {
+                m_client = client;
+                m_itemId = itemId;
+            }
+
+            public void Dispose() { }
+
+            public DaElement Next()
+            {
+                if (m_completed)
+                {
+                    return null;
+                }
+
+                if (m_queue == null)
+                {
+                    m_queue = new Queue<Da30BrowseResult>(m_client.FetchDa30BrowseResults(m_itemId));
+                }
+
+                while (m_queue.Count > 0)
+                {
+                    Da30BrowseResult r = m_queue.Dequeue();
+
+                    if (m_client.Disposed)
+                    {
+                        m_completed = true;
+                        return null;
+                    }
+
+                    DaElement element = m_client.FindElement(r.ItemId, r.Name, m_itemId);
+
+                    if (element != null)
+                    {
+                        return element;
+                    }
+                }
+
+                m_completed = true;
+                return null;
+            }
+
+            public DaElement Find(string targetId, bool isBranch)
+            {
+                if (String.IsNullOrEmpty(targetId))
+                {
+                    return m_client.FindElement(targetId, String.Empty, String.Empty);
+                }
+
+                string parentId = GetParentItemId(targetId);
+                Utils.Trace(Utils.TraceMasks.ExternalSystem, "Da30.Find targetId='{0}' parentId='{1}'", targetId, parentId);
+                return FindAtLevel(parentId, targetId);
+            }
+
+            // Browses only the direct parent level of targetId.
+            private DaElement FindAtLevel(string parentId, string targetId)
+            {
+                List<Da30BrowseResult> siblings = m_client.FetchDa30BrowseResults(parentId);
+
+                foreach (Da30BrowseResult r in siblings)
+                {
+                    if (r.ItemId == targetId)
+                    {
+                        Utils.Trace(Utils.TraceMasks.ExternalSystem, "Da30.FindAtLevel MATCH targetId='{0}'", targetId);
+                        return m_client.FindElement(r.ItemId, r.Name, parentId);
+                    }
+                }
+
+                // Log mismatch details to diagnose why no item matched.
+                if (siblings.Count == 0)
+                {
+                    Utils.Trace(Utils.TraceMasks.ExternalSystem, "Da30.FindAtLevel NO-RESULTS parentId='{0}' targetId='{1}'", parentId, targetId);
+                }
+                else
+                {
+                    Utils.Trace(Utils.TraceMasks.ExternalSystem, "Da30.FindAtLevel NO-MATCH parentId='{0}' targetId='{1}' first='{2}' count={3}", parentId, targetId, siblings[0].ItemId, siblings.Count);
+                }
+
+                return null;
+            }
+
+            // Extracts the parent item ID by stripping the last path segment (handles both \ and . separators).
+            private static string GetParentItemId(string itemId)
+            {
+                if (String.IsNullOrEmpty(itemId)) return String.Empty;
+
+                // SIMATIC NET: item IDs use '.' (szItemID), browse navigation paths use '\'.
+                int lastBackslash = itemId.LastIndexOf('\\');
+                int lastDot       = itemId.LastIndexOf('.');
+
+                // Prefer backslash when present; fall back to dot.
+                int last = lastBackslash > 0 ? lastBackslash : lastDot;
+
+                if (last <= 0) return String.Empty;
+
+                return itemId.Substring(0, last);
+            }
+
+            // BFS search starting from the namespace root (fallback only).
+            private DaElement FindRecursive(string parentId, string targetId)
+            {
+                List<Da30BrowseResult> children = m_client.FetchDa30BrowseResults(parentId);
+
+                foreach (Da30BrowseResult r in children)
+                {
+                    if (r.ItemId == targetId)
+                    {
+                        return m_client.FindElement(r.ItemId, r.Name, parentId);
+                    }
+                }
+
+                foreach (Da30BrowseResult r in children)
+                {
+                    if (r.HasChildren && !String.IsNullOrEmpty(r.ItemId))
+                    {
+                        DaElement found = FindRecursive(r.ItemId, targetId);
+
+                        if (found != null)
+                        {
+                            return found;
+                        }
+                    }
+                }
+
+                return null;
+            }
         }
         #endregion
 
@@ -1831,6 +2214,12 @@ namespace Opc.Ua.Com.Client
         private Dictionary<string,DaElement> m_cache;
         private ComDaClientConfiguration m_configuration;
         private bool m_supportsIOPCItemIO;
+        private volatile bool m_pendingCacheSave;
+        private DateTime m_lastNewCacheItem = DateTime.MinValue;
+        private static readonly Dictionary<string, Dictionary<string, DaElement>> s_sharedCaches =
+            new Dictionary<string, Dictionary<string, DaElement>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly System.Collections.Generic.HashSet<string> s_warmUpGuard =
+            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         #endregion
     }
 

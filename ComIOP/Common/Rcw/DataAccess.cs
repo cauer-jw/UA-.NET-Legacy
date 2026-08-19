@@ -984,7 +984,7 @@ namespace OpcRcw.Da
         void Browse(
             [MarshalAs(UnmanagedType.LPWStr)]  
             string szItemID,
-            ref IntPtr pszContinuationPoint,
+            [MarshalAs(UnmanagedType.LPWStr)] ref string pszContinuationPoint,
             [MarshalAs(UnmanagedType.I4)]  
             int dwMaxElementsReturned,
             OPCBROWSEFILTER dwBrowseFilter,
