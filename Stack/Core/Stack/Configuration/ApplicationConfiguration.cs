@@ -696,6 +696,7 @@ namespace Opc.Ua
         public void ApplySettings()
         {           
             Utils.SetTraceLog(m_outputFilePath, m_deleteOnLoad);
+            Utils.SetTraceLogLimits(m_maxLogFileSize, m_maxLogFileBackups);
             Utils.SetTraceMask(m_traceMasks);
 
             if (m_traceMasks == 0)

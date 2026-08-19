@@ -153,6 +153,8 @@
   <TraceConfiguration>
     <OutputFilePath>Logs\Opc.Ua.ComServerWrapper.log.txt</OutputFilePath>
     <DeleteOnLoad>true</DeleteOnLoad>
+    <MaxLogFileSize>10485760</MaxLogFileSize>
+    <MaxLogFileBackups>10</MaxLogFileBackups>
     <!-- Show Only Errors -->
     <!-- <TraceMasks>1</TraceMasks> -->
     <!-- Show Only Security and Errors -->

@@ -429,6 +429,8 @@ namespace Opc.Ua
 		{
             m_outputFilePath = null;
             m_deleteOnLoad = false;
+            m_maxLogFileSize = 0;
+            m_maxLogFileBackups = 0;
 		}
 
         /// <summary>
@@ -487,12 +489,36 @@ namespace Opc.Ua
             get { return m_traceMasks;  }
             set { m_traceMasks = value; }
         }
+
+        /// <summary>
+        /// The maximum size in bytes for the active log file before rotation.
+        /// A value less than or equal to zero uses the legacy default behavior.
+        /// </summary>
+        [DataMember(IsRequired=false, Order=3)]
+        public long MaxLogFileSize
+        {
+            get { return m_maxLogFileSize; }
+            set { m_maxLogFileSize = value; }
+        }
+
+        /// <summary>
+        /// The maximum number of archived log files to keep.
+        /// A value less than or equal to zero disables archiving and truncates the active file.
+        /// </summary>
+        [DataMember(IsRequired=false, Order=4)]
+        public int MaxLogFileBackups
+        {
+            get { return m_maxLogFileBackups; }
+            set { m_maxLogFileBackups = value; }
+        }
         #endregion
 
         #region Private Fields
         private string m_outputFilePath;
         private bool m_deleteOnLoad;
         private int m_traceMasks;
+		private long m_maxLogFileSize;
+		private int m_maxLogFileBackups;
         #endregion
     }
     #endregion

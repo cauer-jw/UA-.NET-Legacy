@@ -118,6 +118,8 @@ namespace Opc.Ua
         #endif
 
         private static string s_traceFileName = null;
+        private static long s_traceFileMaxSize = 10000000;
+        private static int s_traceFileMaxBackups = 0;
         private static long s_BaseLineTicks = DateTime.UtcNow.Ticks;
         private static object s_traceFileLock = new object();
 
@@ -243,6 +245,18 @@ namespace Opc.Ua
         }
 
         /// <summary>
+        /// Sets the log rotation limits for tracing (thread safe).
+        /// </summary>
+        public static void SetTraceLogLimits(long maxFileSize, int maxArchiveFiles)
+        {
+            lock (s_traceFileLock)
+            {
+                s_traceFileMaxSize = (maxFileSize > 0) ? maxFileSize : 10000000;
+                s_traceFileMaxBackups = (maxArchiveFiles > 0) ? maxArchiveFiles : 0;
+            }
+        }
+
+        /// <summary>
         /// Returns Tracing class instance for event attaching.
         /// </summary>
         public static Tracing Tracing
@@ -300,13 +314,21 @@ namespace Opc.Ua
                     {
                         FileInfo file = new FileInfo(traceFileName);
 
-                        // limit the file size. hard coded for now - fix later.
                         bool truncated = false;
+                        bool rotated = false;
 
-                        if (file.Exists && file.Length > 10000000)
+                        if (file.Exists && s_traceFileMaxSize > 0 && file.Length >= s_traceFileMaxSize)
                         {
-                            file.Delete();
-                            truncated = true;
+                            if (s_traceFileMaxBackups > 0)
+                            {
+                                RotateTraceFile(traceFileName, s_traceFileMaxBackups);
+                                rotated = true;
+                            }
+                            else
+                            {
+                                file.Delete();
+                                truncated = true;
+                            }
                         }
 
                         using (StreamWriter writer = new StreamWriter(File.Open(traceFileName, FileMode.Append)))
@@ -314,6 +336,11 @@ namespace Opc.Ua
                             if (truncated)
                             {
                                 writer.WriteLine("WARNING - LOG FILE TRUNCATED.");
+                            }
+
+                            if (rotated)
+                            {
+                                writer.WriteLine("WARNING - LOG FILE ROTATED.");
                             }
 
                             writer.WriteLine(output);
@@ -326,6 +353,52 @@ namespace Opc.Ua
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Rotates a trace file by renaming file.log to file.log.1 and shifting older archives.
+        /// </summary>
+        private static void RotateTraceFile(string traceFileName, int maxBackups)
+        {
+            if (maxBackups <= 0)
+            {
+                return;
+            }
+
+            for (int ii = maxBackups; ii >= 1; ii--)
+            {
+                string archivePath = GetArchiveTraceFilePath(traceFileName, ii);
+
+                if (File.Exists(archivePath))
+                {
+                    File.Delete(archivePath);
+                }
+
+                if (ii == 1)
+                {
+                    if (File.Exists(traceFileName))
+                    {
+                        File.Move(traceFileName, archivePath);
+                    }
+
+                    continue;
+                }
+
+                string previousArchivePath = GetArchiveTraceFilePath(traceFileName, ii - 1);
+
+                if (File.Exists(previousArchivePath))
+                {
+                    File.Move(previousArchivePath, archivePath);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns the archive path for a trace file backup index.
+        /// </summary>
+        private static string GetArchiveTraceFilePath(string traceFileName, int index)
+        {
+            return String.Format(CultureInfo.InvariantCulture, "{0}.{1}", traceFileName, index);
         }
 
         /// <summary>
