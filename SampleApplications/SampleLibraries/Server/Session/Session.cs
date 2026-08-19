@@ -452,11 +452,15 @@ namespace Opc.Ua.Server
                     }
                 }
 
-                // verify timestamp.
-                if (requestHeader.Timestamp.AddMilliseconds(m_maxRequestAge) < DateTime.UtcNow)
+                // verify timestamp - accept if MaxRequestAge is 0 (disabled).
+                if (m_maxRequestAge > 0)
                 {
-                    UpdateDiagnosticCounters(requestType, true, false);
-                    throw new ServiceResultException(StatusCodes.BadInvalidTimestamp);
+                    long diffMs = (long)Math.Abs((DateTime.UtcNow - requestHeader.Timestamp).TotalMilliseconds);
+                    if (diffMs > m_maxRequestAge)
+                    {
+                        UpdateDiagnosticCounters(requestType, true, false);
+                        throw new ServiceResultException(StatusCodes.BadInvalidTimestamp);
+                    }
                 }
 
                 // request accepted.

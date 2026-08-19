@@ -49,6 +49,15 @@ namespace Opc.Ua.Com.Client
                     return;
                 }
 
+                // Warn if the system clock looks invalid (e.g. dead CMOS battery reset to ~year 2000).
+                if (DateTime.UtcNow.Year < 2020)
+                {
+                    Utils.Trace(Utils.TraceMasks.Error,
+                        "System clock appears invalid ({0:u}). Check CMOS battery. " +
+                        "MaxRequestAge=0 in config suppresses the timestamp check as a workaround.",
+                        DateTime.UtcNow);
+                }
+
                 // check if running as a service.
                 if (!Environment.UserInteractive)
                 {
