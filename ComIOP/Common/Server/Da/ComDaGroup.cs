@@ -1135,10 +1135,11 @@ namespace Opc.Ua.Com.Server
                     targetType = VarEnum.VT_EMPTY;
                 }
 
-                // As a last resort for unknown Variant tags, return a concrete scalar instead of COM Null.
+                // Type cannot be determined; signal per-item error so clients do not attempt to cast null.
                 if (targetType == VarEnum.VT_EMPTY)
                 {
-                    targetType = VarEnum.VT_BOOL;
+                    if (value.Error >= 0) value.Error = ResultIds.E_BADTYPE;
+                    return;
                 }
 
                 // Some COM clients cast callback values without checking quality first.

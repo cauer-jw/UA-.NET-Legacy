@@ -43,6 +43,7 @@ namespace Opc.Ua.Com.Client
             m_clientHandle = Utils.IncrementIdentifier(ref m_groupCounter);
             m_serverHandle = 0;
             m_items = new List<GroupItem>();
+            m_itemsByClientHandle = new Dictionary<int, GroupItem>();
 
             if (callbacksRequired)
             {
@@ -167,6 +168,7 @@ namespace Opc.Ua.Com.Client
             public MonitoredItem[] MonitoredItems;
             public DataValue LastValue;
             public ServiceResult LastError;
+            public bool PreloadAttempted;
         }
 
         /// <summary>
@@ -182,7 +184,7 @@ namespace Opc.Ua.Com.Client
                 return;
             }
 
-            m_dataChangeCallbackCount++;
+            Interlocked.Increment(ref m_dataChangeCallbackCount);
 
             int count = Math.Min(clientHandles.Length, values.Length);
             int nullBefore = 0;
@@ -203,7 +205,7 @@ namespace Opc.Ua.Com.Client
             if (nullBefore > 0 && m_initialBackfillAttempts < 5)
             {
                 replaced = BackfillInitialNullValues(clientHandles, values, out missing);
-                m_initialBackfillAttempts++;
+                Interlocked.Increment(ref m_initialBackfillAttempts);
             }
 
             if (m_dataChangeCallbackCount <= 3 || nullBefore > 0)
@@ -245,6 +247,11 @@ namespace Opc.Ua.Com.Client
                     MonitoredItem[] monitoredItems = info.MonitoredItems;
 
                     if (monitoredItems == null || monitoredItems.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (values[ii] == null)
                     {
                         continue;
                     }
@@ -330,18 +337,9 @@ namespace Opc.Ua.Com.Client
                         continue;
                     }
 
-                    GroupItem item = null;
-
-                    for (int jj = 0; jj < m_items.Count; jj++)
-                    {
-                        if (m_items[jj].ClientHandle == clientHandles[ii])
-                        {
-                            item = m_items[jj];
-                            break;
-                        }
-                    }
-
-                    if (item == null || !item.Created || item.ServerHandle == 0)
+                    GroupItem item;
+                    if (!m_itemsByClientHandle.TryGetValue(clientHandles[ii], out item)
+                        || !item.Created || item.ServerHandle == 0)
                     {
                         continue;
                     }
@@ -433,17 +431,10 @@ namespace Opc.Ua.Com.Client
                 {
                     for (int hh = 0; hh < callbackHandles.Length && allValid; hh++)
                     {
-                        bool found = false;
-                        for (int ii = 0; ii < m_items.Count; ii++)
-                        {
-                            if (m_items[ii].Created && m_items[ii].ErrorId >= 0
-                                && m_items[ii].ClientHandle == callbackHandles[hh])
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) allValid = false;
+                        GroupItem g;
+                        if (!m_itemsByClientHandle.TryGetValue(callbackHandles[hh], out g)
+                            || !g.Created || g.ErrorId < 0)
+                            allValid = false;
                     }
                 }
                 if (allValid) return callbackHandles;
@@ -458,10 +449,8 @@ namespace Opc.Ua.Com.Client
 
                 lock (Lock)
                 {
-                    for (int ii = 0; ii < m_items.Count; ii++)
+                    foreach (GroupItem item in m_itemsByClientHandle.Values)
                     {
-                        GroupItem item = m_items[ii];
-
                         if (!item.Created || item.ErrorId < 0)
                         {
                             continue;
@@ -660,6 +649,7 @@ namespace Opc.Ua.Com.Client
             lock (Lock)
             {
                 m_items.Add(item);
+                m_itemsByClientHandle[item.ClientHandle] = item;
             }
 
             return item;
@@ -932,6 +922,7 @@ namespace Opc.Ua.Com.Client
                     if (m_items[ii].Deleted && m_items[ii].Created)
                     {
                         itemsToRemove.Add(m_items[ii]);
+                        m_itemsByClientHandle.Remove(m_items[ii].ClientHandle);
                         continue;
                     }
 
@@ -1189,26 +1180,41 @@ namespace Opc.Ua.Com.Client
 
             List<GroupItem> toRead = new List<GroupItem>();
 
+            // Copy items under Lock without accessing m_monitoredItems to avoid nested lock.
+            List<GroupItem> candidates;
             lock (Lock)
             {
-                lock (m_monitoredItems)
+                candidates = new List<GroupItem>(m_items.Count);
+                for (int ii = 0; ii < m_items.Count; ii++)
                 {
-                    for (int ii = 0; ii < m_items.Count; ii++)
+                    GroupItem item = m_items[ii];
+                    if (!item.Created || item.ServerHandle == 0 || item.ErrorId < 0)
                     {
-                        GroupItem item = m_items[ii];
-                        if (!item.Created || item.ServerHandle == 0 || item.ErrorId < 0)
-                        {
-                            continue;
-                        }
-
-                        DataChangeInfo info;
-                        if (m_monitoredItems.TryGetValue(item.ClientHandle, out info) && info.LastValue != null)
-                        {
-                            continue;
-                        }
-
-                        toRead.Add(item);
+                        continue;
                     }
+                    candidates.Add(item);
+                }
+            }
+
+            // Select candidates and mark PreloadAttempted before SyncRead to suppress retries on failure.
+            lock (m_monitoredItems)
+            {
+                for (int ii = 0; ii < candidates.Count; ii++)
+                {
+                    GroupItem item = candidates[ii];
+                    DataChangeInfo info;
+                    if (!m_monitoredItems.TryGetValue(item.ClientHandle, out info))
+                    {
+                        m_monitoredItems[item.ClientHandle] = info = new DataChangeInfo();
+                    }
+
+                    if (info.LastValue != null || info.PreloadAttempted)
+                    {
+                        continue;
+                    }
+
+                    info.PreloadAttempted = true;
+                    toRead.Add(item);
                 }
             }
 
@@ -1418,10 +1424,11 @@ namespace Opc.Ua.Com.Client
         private float m_deadband;
         private bool m_updateRequired;
         private List<GroupItem> m_items;
+        private Dictionary<int, GroupItem> m_itemsByClientHandle;
         private ComDaDataCallback m_callback;
         private Dictionary<int, DataChangeInfo> m_monitoredItems;
-        private volatile int m_dataChangeCallbackCount;
-        private volatile int m_initialBackfillAttempts;
+        private int m_dataChangeCallbackCount;
+        private int m_initialBackfillAttempts;
         #endregion
     }
 
