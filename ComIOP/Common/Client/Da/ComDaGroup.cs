@@ -339,7 +339,7 @@ namespace Opc.Ua.Com.Client
 
                     GroupItem item;
                     if (!m_itemsByClientHandle.TryGetValue(clientHandles[ii], out item)
-                        || !item.Created || item.ServerHandle == 0)
+                        || !item.Created || item.Deleted || item.ServerHandle == 0)
                     {
                         continue;
                     }
@@ -433,7 +433,7 @@ namespace Opc.Ua.Com.Client
                     {
                         GroupItem g;
                         if (!m_itemsByClientHandle.TryGetValue(callbackHandles[hh], out g)
-                            || !g.Created || g.ErrorId < 0)
+                            || !g.Created || g.Deleted || g.ErrorId < 0)
                             allValid = false;
                     }
                 }
@@ -451,7 +451,7 @@ namespace Opc.Ua.Com.Client
                 {
                     foreach (GroupItem item in m_itemsByClientHandle.Values)
                     {
-                        if (!item.Created || item.ErrorId < 0)
+                        if (!item.Created || item.Deleted || item.ErrorId < 0)
                         {
                             continue;
                         }

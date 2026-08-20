@@ -942,11 +942,6 @@ namespace Opc.Ua.Com.Server
                 item.RemoteDataType = new TypeInfo(builtInType, valueRank);
                 item.CanonicalDataType = (short)ComUtils.GetVarType(item.RemoteDataType);
 
-                if (item.CanonicalDataType == (short)VarEnum.VT_NULL)
-                {
-                    item.CanonicalDataType = (short)VarEnum.VT_EMPTY;
-                }
-
                 // update access rights.
                 byte userAccessLevel = results[first+3].GetValue<byte>(0);
 
