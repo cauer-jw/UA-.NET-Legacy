@@ -2820,6 +2820,11 @@ namespace Opc.Ua.Com.Server
 
                     lock (m_lock)
                     {
+                        if (m_disposed || !m_active || !m_enabled)
+                        {
+                            return;
+                        }
+
                         for (int ii = 0; ii < itemsToUpdate.Count; ii++)
                         {
                             ComDaGroupItem item = itemsToUpdate[ii];
