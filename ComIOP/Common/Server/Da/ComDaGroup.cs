@@ -1039,6 +1039,7 @@ namespace Opc.Ua.Com.Server
                         {
                             results[ii].Quality = OpcRcw.Da.Qualities.OPC_QUALITY_WAITING_FOR_INITIAL_DATA;
                             results[ii].Timestamp = DateTime.UtcNow;
+                            UpdateReadResult(item, results[ii]);
                             continue;
                         }
 
@@ -1106,7 +1107,61 @@ namespace Opc.Ua.Com.Server
         /// <param name="value">The value.</param>
         private void UpdateReadResult(ComDaGroupItem item, DaValue value)
         {
-            if (value.Value == null || item.RequestedDataType == (short)VarEnum.VT_EMPTY)
+            if (value.Value == null)
+            {
+                VarEnum targetType = VarEnum.VT_EMPTY;
+
+                if (item.RequestedDataType != (short)VarEnum.VT_EMPTY)
+                {
+                    targetType = (VarEnum)item.RequestedDataType;
+                }
+                else if (item.CanonicalDataType != (short)VarEnum.VT_EMPTY)
+                {
+                    targetType = (VarEnum)item.CanonicalDataType;
+                }
+
+                if (targetType == VarEnum.VT_EMPTY || targetType == VarEnum.VT_VARIANT || targetType == VarEnum.VT_NULL)
+                {
+                    targetType = ComUtils.GetVarType(item.RemoteDataType);
+                }
+
+                if ((targetType == VarEnum.VT_EMPTY || targetType == VarEnum.VT_VARIANT || targetType == VarEnum.VT_NULL) && item.LastSentValue != null && item.LastSentValue.Value != null)
+                {
+                    targetType = ComUtils.GetVarType(item.LastSentValue.Value);
+                }
+
+                if (targetType == VarEnum.VT_VARIANT || targetType == VarEnum.VT_NULL)
+                {
+                    targetType = VarEnum.VT_EMPTY;
+                }
+
+                // Type cannot be determined; signal per-item error so clients do not attempt to cast null.
+                if (targetType == VarEnum.VT_EMPTY)
+                {
+                    if (value.Error >= 0) value.Error = ResultIds.E_BADTYPE;
+                    return;
+                }
+
+                // Some COM clients cast callback values without checking quality first.
+                // Provide a type-compatible default whenever the per-item COM error is success.
+                if (value.Error >= 0)
+                {
+                    object defaultValue = null;
+
+                    if (TryGetDefaultValueForComType(targetType, out defaultValue))
+                    {
+                        value.Value = defaultValue;
+                    }
+                    else
+                    {
+                        value.Error = ResultIds.E_BADTYPE;
+                    }
+                }
+
+                return;
+            }
+
+            if (item.RequestedDataType == (short)VarEnum.VT_EMPTY)
             {
                 return;
             }
@@ -1123,6 +1178,47 @@ namespace Opc.Ua.Com.Server
             }
 
             value.Value = convertedValue;
+        }
+
+        /// <summary>
+        /// Gets a COM compatible default value for the requested type.
+        /// </summary>
+        private static bool TryGetDefaultValueForComType(VarEnum targetType, out object defaultValue)
+        {
+            defaultValue = null;
+
+            if (targetType == VarEnum.VT_EMPTY || targetType == VarEnum.VT_VARIANT)
+            {
+                return false;
+            }
+
+            Type systemType = ComUtils.GetSystemType((short)targetType);
+
+            if (systemType == null || systemType == typeof(object))
+            {
+                return false;
+            }
+
+            if (systemType == typeof(string))
+            {
+                defaultValue = String.Empty;
+                return true;
+            }
+
+            if (systemType.IsArray)
+            {
+                Type elementType = systemType.GetElementType() ?? typeof(object);
+                defaultValue = Array.CreateInstance(elementType, 0);
+                return true;
+            }
+
+            if (systemType.IsValueType)
+            {
+                defaultValue = Activator.CreateInstance(systemType);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -2601,7 +2697,7 @@ namespace Opc.Ua.Com.Server
                         (clientHandles != null) ? clientHandles.ToArray() : new int[0],
                         (values != null) ? values.ToArray() : new DaValue[0]);
 
-                    if (clientHandles.Count > 0)
+                    if (clientHandles != null && clientHandles.Count > 0)
                     {
                         m_manager.SetLastUpdateTime();
                     }
@@ -2717,17 +2813,39 @@ namespace Opc.Ua.Com.Server
                 // read values.
                 DaValue[] results = SyncRead(request.MaxAge, serverHandles, request.IsRefresh, null);
 
-                // update cache.
-                if (request.IsFirstUpdate)
+                // update cache and build filtered callback data, re-validating against current item state.
+                int[] callbackClientHandles = request.ClientHandles;
+                DaValue[] callbackResults = results;
+
+                if (request.IsFirstUpdate && itemsToUpdate != null)
                 {
+                    List<int> validHandles = new List<int>(itemsToUpdate.Count);
+                    List<DaValue> validResults = new List<DaValue>(itemsToUpdate.Count);
+
                     lock (m_lock)
                     {
+                        if (m_disposed || !m_active || !m_enabled)
+                        {
+                            return;
+                        }
+
                         for (int ii = 0; ii < itemsToUpdate.Count; ii++)
                         {
-                            ComDaGroupItem item = m_items[ii];
-                            item.LastSentValue = results[ii];
+                            ComDaGroupItem item = itemsToUpdate[ii];
+                            ComDaGroupItem current;
+                            if (!m_itemsByHandle.TryGetValue(item.ServerHandle, out current)
+                                || !ReferenceEquals(current, item) || !current.Active)
+                            {
+                                continue;  // removed, deactivated, or handle reused for a different item
+                            }
+                            current.LastSentValue = results[ii];
+                            validHandles.Add(current.ClientHandle);
+                            validResults.Add(results[ii]);
                         }
                     }
+
+                    callbackClientHandles = validHandles.ToArray();
+                    callbackResults = validResults.ToArray();
                 }
 
                 // send callback.
@@ -2736,8 +2854,8 @@ namespace Opc.Ua.Com.Server
                     request.IsRefresh,
                     request.CancelId,
                     request.TransactionId,
-                    request.ClientHandles,
-                    results);
+                    callbackClientHandles,
+                    callbackResults);
 
                 TraceState("OnAsyncRead Completed", request.TransactionId, request.CancelId);
             }

@@ -108,8 +108,20 @@ namespace Opc.Ua.Com.Client
 				    pftTimeStamps, 
 				    pErrors);
 
+			    int[] clientHandles = phClientItems;
+
+			    if (clientHandles == null || clientHandles.Length != values.Length)
+			    {
+				    Utils.Trace(
+				        Utils.TraceMasks.Information,
+				        "OnDataChange handle mismatch: expected={0}, received={1}",
+				        values.Length,
+				        clientHandles != null ? clientHandles.Length : -1);
+				    clientHandles = m_group.ResolveCallbackClientHandles(values.Length, clientHandles);
+			    }
+
 			    // invoke the callback.
-			    m_group.OnDataChange(phClientItems, values);
+			    m_group.OnDataChange(clientHandles, values);
 		    }
 		    catch (Exception e) 
 		    { 

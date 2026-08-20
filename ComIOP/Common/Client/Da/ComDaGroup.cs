@@ -43,6 +43,7 @@ namespace Opc.Ua.Com.Client
             m_clientHandle = Utils.IncrementIdentifier(ref m_groupCounter);
             m_serverHandle = 0;
             m_items = new List<GroupItem>();
+            m_itemsByClientHandle = new Dictionary<int, GroupItem>();
 
             if (callbacksRequired)
             {
@@ -156,6 +157,16 @@ namespace Opc.Ua.Com.Client
                         monitoredItems[ii].QueueValue(info.LastValue, info.LastError);
                     }
                 }
+                else
+                {
+                    // Queue BadWaiting with non-null Value so the first Publish never carries VT_EMPTY/VT_NULL
+                    // (PreloadInitialValues will overwrite this with the real value once SyncRead completes).
+                    var pending = new DataValue(new Variant(false), StatusCodes.BadWaitingForInitialData, DateTime.UtcNow, DateTime.UtcNow);
+                    for (int ii = 0; ii < monitoredItems.Length; ii++)
+                    {
+                        monitoredItems[ii].QueueValue(pending, null);
+                    }
+                }
             }
         }
 
@@ -167,6 +178,7 @@ namespace Opc.Ua.Com.Client
             public MonitoredItem[] MonitoredItems;
             public DataValue LastValue;
             public ServiceResult LastError;
+            public bool PreloadAttempted;
         }
 
         /// <summary>
@@ -177,15 +189,63 @@ namespace Opc.Ua.Com.Client
         internal void OnDataChange(int[] clientHandles, DaValue[] values)
         {
             // check if callbacks are enabled.
-            if (m_monitoredItems == null)
+            if (m_monitoredItems == null || clientHandles == null || values == null)
             {
                 return;
+            }
+
+            Interlocked.Increment(ref m_dataChangeCallbackCount);
+
+            int count = Math.Min(clientHandles.Length, values.Length);
+            int nullBefore = 0;
+
+            for (int ii = 0; ii < count; ii++)
+            {
+                if (values[ii] == null || values[ii].Error < 0 || values[ii].Value == null)
+                {
+                    nullBefore++;
+                }
+            }
+
+            // Some COM servers provide incomplete values across the first few callbacks after reconnect.
+            // Backfill null values with direct device reads for the missing items (limited retries).
+            int missing = 0;
+            int replaced = 0;
+
+            if (nullBefore > 0 && m_initialBackfillAttempts < 5)
+            {
+                replaced = BackfillInitialNullValues(clientHandles, values, out missing);
+                Interlocked.Increment(ref m_initialBackfillAttempts);
+            }
+
+            if (m_dataChangeCallbackCount <= 3 || nullBefore > 0)
+            {
+                int nullAfter = 0;
+
+                for (int ii = 0; ii < count; ii++)
+                {
+                    if (values[ii] == null || values[ii].Error < 0 || values[ii].Value == null)
+                    {
+                        nullAfter++;
+                    }
+                }
+
+                Utils.Trace(
+                    Utils.TraceMasks.Information,
+                    "OnDataChange summary: Group={0}, Callback={1}, Count={2}, NullBefore={3}, MissingHandles={4}, Replaced={5}, NullAfter={6}",
+                    m_clientHandle,
+                    m_dataChangeCallbackCount,
+                    count,
+                    nullBefore,
+                    missing,
+                    replaced,
+                    nullAfter);
             }
 
             // lookup client handle a report change directly to monitored item.
             lock (m_monitoredItems)
             {
-                for (int ii = 0; ii < clientHandles.Length; ii++)
+                for (int ii = 0; ii < count; ii++)
                 {
                     DataChangeInfo info = null;
 
@@ -196,16 +256,62 @@ namespace Opc.Ua.Com.Client
 
                     MonitoredItem[] monitoredItems = info.MonitoredItems;
 
-                    // convert the value to a UA value.
-                    info.LastValue = new DataValue();
-                    info.LastError = ReadRequest.GetItemValue(values[ii], info.LastValue, DiagnosticsMasks.All);
-                    info.LastValue.ServerTimestamp = DateTime.UtcNow;
+                    if (monitoredItems == null || monitoredItems.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (values[ii] == null)
+                    {
+                        continue;
+                    }
+
+                    // Validate before updating cache: null+good transient values are suppressed without touching info.
+                    DataValue candidate = new DataValue();
+                    ServiceResult candidateError = ReadRequest.GetItemValue(values[ii], candidate, DiagnosticsMasks.All);
+                    candidate.ServerTimestamp = DateTime.UtcNow;
+
+                    if (candidate.Value == null && StatusCode.IsGood(candidate.StatusCode))
+                    {
+                        continue;
+                    }
+
+                    // For any non-good null value, fill a type-compatible default; skip if no safe fallback.
+                    if (candidate.Value == null && !StatusCode.IsGood(candidate.StatusCode))
+                    {
+                        if (info.LastValue != null && info.LastValue.Value != null)
+                        {
+                            Type t = info.LastValue.Value.GetType();
+                            if (t.IsValueType)
+                            {
+                                candidate.Value = Activator.CreateInstance(t);
+                            }
+                            else if (t == typeof(string))
+                            {
+                                candidate.Value = String.Empty;
+                            }
+                            else if (t.IsArray)
+                            {
+                                Type elem = t.GetElementType() ?? typeof(object);
+                                candidate.Value = Array.CreateInstance(elem, new int[t.GetArrayRank()]);
+                            }
+                        }
+
+                        if (candidate.Value == null)
+                        {
+                            continue;
+                        }
+                    }
+
+                    info.LastValue = candidate;
+                    info.LastError = candidateError;
 
                     // queue the values.
                     for (int jj = 0; jj < monitoredItems.Length; jj++)
                     {
 
-                        if (info.LastValue.Value.GetType().IsArray
+                        if (info.LastValue.Value != null
+                            && info.LastValue.Value.GetType().IsArray
                             && monitoredItems[jj].IndexRange.Count != info.LastValue.Value.GetType().GetArrayRank()
                             && StatusCode.IsBad(info.LastValue.StatusCode))
                         {
@@ -216,6 +322,86 @@ namespace Opc.Ua.Com.Client
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Replaces null values in the first callback with direct sync reads for the same items.
+        /// </summary>
+        private int BackfillInitialNullValues(int[] clientHandles, DaValue[] values, out int missing)
+        {
+            int count = Math.Min(clientHandles.Length, values.Length);
+            missing = 0;
+
+            List<int> missingIndexes = new List<int>();
+            List<int> missingServerHandles = new List<int>();
+
+            lock (Lock)
+            {
+                for (int ii = 0; ii < count; ii++)
+                {
+                    DaValue value = values[ii];
+
+                    if (value != null && value.Error >= 0 && value.Value != null
+                        && value.Quality != OpcRcw.Da.Qualities.OPC_QUALITY_WAITING_FOR_INITIAL_DATA)
+                    {
+                        continue;
+                    }
+
+                    GroupItem item;
+                    if (!m_itemsByClientHandle.TryGetValue(clientHandles[ii], out item)
+                        || !item.Created || item.Deleted || item.ServerHandle == 0)
+                    {
+                        continue;
+                    }
+
+                    missingIndexes.Add(ii);
+                    missingServerHandles.Add(item.ServerHandle);
+                }
+            }
+
+            if (missingServerHandles.Count == 0)
+            {
+                return 0;
+            }
+
+            missing = missingServerHandles.Count;
+
+            DaValue[] retries = null;
+
+            try
+            {
+                retries = SyncRead(missingServerHandles.ToArray(), missingServerHandles.Count);
+            }
+            catch (Exception e)
+            {
+                Utils.Trace(Utils.TraceMasks.Error, "Initial callback backfill failed. Group={0}, Missing={1}: {2}", m_clientHandle, missingServerHandles.Count, e.Message);
+                return 0;
+            }
+
+            if (retries == null)
+            {
+                Utils.Trace(Utils.TraceMasks.Error, "Initial callback backfill failed. Group={0}, Missing={1}", m_clientHandle, missingServerHandles.Count);
+                return 0;
+            }
+
+            int replaced = 0;
+
+            for (int ii = 0; ii < retries.Length && ii < missingIndexes.Count; ii++)
+            {
+                DaValue retry = retries[ii];
+
+                if (retry == null || retry.Error < 0 || retry.Value == null)
+                {
+                    continue;
+                }
+
+                values[missingIndexes[ii]] = retry;
+                replaced++;
+            }
+
+            Utils.Trace(Utils.TraceMasks.Information, "Initial callback backfill: Group={0}, Missing={1}, Replaced={2}", m_clientHandle, missingServerHandles.Count, replaced);
+
+            return replaced;
         }
 
         /// <summary>
@@ -236,6 +422,74 @@ namespace Opc.Ua.Com.Client
         /// <param name="errors">The errors.</param>
         internal void OnWriteComplete(int requestId, int[] clientHandles, int[] errors)
         {
+        }
+
+        /// <summary>
+        /// Resolves callback client handles when the callback payload is missing or truncated.
+        /// </summary>
+        internal int[] ResolveCallbackClientHandles(int expectedCount, int[] callbackHandles)
+        {
+            if (expectedCount <= 0)
+            {
+                return new int[0];
+            }
+
+            if (callbackHandles != null && callbackHandles.Length == expectedCount)
+            {
+                bool allValid = true;
+                lock (Lock)
+                {
+                    for (int hh = 0; hh < callbackHandles.Length && allValid; hh++)
+                    {
+                        GroupItem g;
+                        if (!m_itemsByClientHandle.TryGetValue(callbackHandles[hh], out g)
+                            || !g.Created || g.Deleted || g.ErrorId < 0)
+                            allValid = false;
+                    }
+                }
+                if (allValid) return callbackHandles;
+                // fall through: invalid handles trigger single-item or synthetic path
+            }
+
+            // Reconstruct handles only for single-item callbacks with exactly one candidate to avoid
+            // misattributing values to wrong tags in multi-item callbacks with missing handle arrays.
+            if (expectedCount == 1)
+            {
+                int candidate = Int32.MinValue;
+
+                lock (Lock)
+                {
+                    foreach (GroupItem item in m_itemsByClientHandle.Values)
+                    {
+                        if (!item.Created || item.Deleted || item.ErrorId < 0)
+                        {
+                            continue;
+                        }
+
+                        if (candidate != Int32.MinValue)
+                        {
+                            candidate = Int32.MinValue;
+                            break;
+                        }
+
+                        candidate = item.ClientHandle;
+                    }
+                }
+
+                if (candidate != Int32.MinValue)
+                {
+                    return new int[] { candidate };
+                }
+            }
+
+            int[] synthetic = new int[expectedCount];
+
+            for (int ii = 0; ii < expectedCount; ii++)
+            {
+                synthetic[ii] = Int32.MinValue + ii;
+            }
+
+            return synthetic;
         }
 
         /// <summary>
@@ -405,6 +659,7 @@ namespace Opc.Ua.Com.Client
             lock (Lock)
             {
                 m_items.Add(item);
+                m_itemsByClientHandle[item.ClientHandle] = item;
             }
 
             return item;
@@ -677,6 +932,7 @@ namespace Opc.Ua.Com.Client
                     if (m_items[ii].Deleted && m_items[ii].Created)
                     {
                         itemsToRemove.Add(m_items[ii]);
+                        m_itemsByClientHandle.Remove(m_items[ii].ClientHandle);
                         continue;
                     }
 
@@ -870,13 +1126,19 @@ namespace Opc.Ua.Com.Client
             ActivateItems(true);
             ActivateItems(false);
 
+            // Pre-seed initial values so the first UA Publish carries real data instead of BadWaitingForInitialData.
+            PreloadInitialValues();
+
             // check if at least one valid item.
+            // Collect error handles outside lock to avoid holding Lock during OnDataChange → BackfillInitialNullValues.
+            int[] errorHandles = null;
+            DaValue[] errorValues = null;
+            bool result = false;
+
             lock (Lock)
             {
-                List<int> clientHandles = new List<int>();
-                List<DaValue> values = new List<DaValue>();
-
-                bool result = false;
+                List<int> clientHandles = null;
+                List<DaValue> values = null;
 
                 for (int ii = 0; ii < m_items.Count; ii++)
                 {
@@ -896,19 +1158,152 @@ namespace Opc.Ua.Com.Client
                         clientHandles.Add(m_items[ii].ClientHandle);
                         values.Add(new DaValue() { Error = m_items[ii].ErrorId, Timestamp = DateTime.UtcNow });
                     }
-
-                    if (clientHandles != null)
-                    {
-                        OnDataChange(clientHandles.ToArray(), values.ToArray());
-                    }
                 }
 
-                return result;
+                if (clientHandles != null && clientHandles.Count > 0)
+                {
+                    errorHandles = clientHandles.ToArray();
+                    errorValues = values.ToArray();
+                }
             }
+
+            if (errorHandles != null)
+            {
+                OnDataChange(errorHandles, errorValues);
+            }
+
+            return result;
         }
         #endregion
 
         #region Private Methods
+        /// <summary>
+        /// Reads current values from device for newly created items and caches them
+        /// so SetMonitoredItems can seed the UA subscription before the first Publish fires.
+        /// </summary>
+        private void PreloadInitialValues()
+        {
+            if (m_monitoredItems == null)
+            {
+                return;
+            }
+
+            List<GroupItem> toRead = new List<GroupItem>();
+
+            // Copy items under Lock without accessing m_monitoredItems to avoid nested lock.
+            List<GroupItem> candidates;
+            lock (Lock)
+            {
+                candidates = new List<GroupItem>(m_items.Count);
+                for (int ii = 0; ii < m_items.Count; ii++)
+                {
+                    GroupItem item = m_items[ii];
+                    if (!item.Created || item.ServerHandle == 0 || item.ErrorId < 0)
+                    {
+                        continue;
+                    }
+                    candidates.Add(item);
+                }
+            }
+
+            // Select candidates and mark PreloadAttempted before SyncRead to suppress retries on failure.
+            lock (m_monitoredItems)
+            {
+                for (int ii = 0; ii < candidates.Count; ii++)
+                {
+                    GroupItem item = candidates[ii];
+                    DataChangeInfo info;
+                    if (!m_monitoredItems.TryGetValue(item.ClientHandle, out info))
+                    {
+                        m_monitoredItems[item.ClientHandle] = info = new DataChangeInfo();
+                    }
+
+                    if (info.LastValue != null || info.PreloadAttempted)
+                    {
+                        continue;
+                    }
+
+                    info.PreloadAttempted = true;
+                    toRead.Add(item);
+                }
+            }
+
+            if (toRead.Count == 0)
+            {
+                return;
+            }
+
+            int[] serverHandles = new int[toRead.Count];
+            for (int ii = 0; ii < toRead.Count; ii++)
+            {
+                serverHandles[ii] = toRead[ii].ServerHandle;
+            }
+
+            DaValue[] readResults = null;
+
+            try
+            {
+                readResults = SyncRead(serverHandles, toRead.Count);
+            }
+            catch (Exception e)
+            {
+                Utils.Trace(Utils.TraceMasks.Error, "PreloadInitialValues SyncRead failed: {0}", e.Message);
+                return;
+            }
+
+            if (readResults == null)
+            {
+                return;
+            }
+
+            int successCount = 0;
+
+            lock (m_monitoredItems)
+            {
+                for (int ii = 0; ii < readResults.Length && ii < toRead.Count; ii++)
+                {
+                    DaValue daValue = readResults[ii];
+                    if (daValue == null || daValue.Error < 0 || daValue.Value == null)
+                    {
+                        continue;
+                    }
+
+                    DataValue uaValue = new DataValue();
+                    ServiceResult serviceResult = ReadRequest.GetItemValue(daValue, uaValue, DiagnosticsMasks.All);
+
+                    if (uaValue.Value == null)
+                    {
+                        continue;
+                    }
+
+                    int clientHandle = toRead[ii].ClientHandle;
+                    DataChangeInfo info;
+                    if (!m_monitoredItems.TryGetValue(clientHandle, out info))
+                    {
+                        m_monitoredItems[clientHandle] = info = new DataChangeInfo();
+                    }
+
+                    if (info.LastValue == null)
+                    {
+                        info.LastValue = uaValue;
+                        info.LastError = serviceResult;
+                        successCount++;
+
+                        // Queue immediately to MonitoredItems if already linked (SetMonitoredItems runs before PreloadInitialValues).
+                        if (info.MonitoredItems != null)
+                        {
+                            for (int jj = 0; jj < info.MonitoredItems.Length; jj++)
+                            {
+                                info.MonitoredItems[jj].QueueValue(info.LastValue, info.LastError);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Utils.Trace(Utils.TraceMasks.Information, "PreloadInitialValues: Group={0}, Preloaded={1}/{2}", m_clientHandle, successCount, m_items.Count);
+        }
+
         /// <summary>
         /// Unmarshals and deallocates a OPCITEMRESULT structures.
         /// </summary>
@@ -1039,8 +1434,11 @@ namespace Opc.Ua.Com.Client
         private float m_deadband;
         private bool m_updateRequired;
         private List<GroupItem> m_items;
+        private Dictionary<int, GroupItem> m_itemsByClientHandle;
         private ComDaDataCallback m_callback;
         private Dictionary<int, DataChangeInfo> m_monitoredItems;
+        private int m_dataChangeCallbackCount;
+        private int m_initialBackfillAttempts;
         #endregion
     }
 
