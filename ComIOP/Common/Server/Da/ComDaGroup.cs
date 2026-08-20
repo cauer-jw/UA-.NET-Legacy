@@ -1152,6 +1152,10 @@ namespace Opc.Ua.Com.Server
                     {
                         value.Value = defaultValue;
                     }
+                    else
+                    {
+                        value.Error = ResultIds.E_BADTYPE;
+                    }
                 }
 
                 return;
@@ -2829,9 +2833,10 @@ namespace Opc.Ua.Com.Server
                         {
                             ComDaGroupItem item = itemsToUpdate[ii];
                             ComDaGroupItem current;
-                            if (!m_itemsByHandle.TryGetValue(item.ServerHandle, out current) || !current.Active)
+                            if (!m_itemsByHandle.TryGetValue(item.ServerHandle, out current)
+                                || !ReferenceEquals(current, item) || !current.Active)
                             {
-                                continue;  // removed or deactivated during SyncRead
+                                continue;  // removed, deactivated, or handle reused for a different item
                             }
                             current.LastSentValue = results[ii];
                             validHandles.Add(current.ClientHandle);
