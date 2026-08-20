@@ -249,17 +249,27 @@ namespace Opc.Ua.Com.Client
                         continue;
                     }
 
-                    // convert the value to a UA value.
-                    info.LastValue = new DataValue();
-                    info.LastError = ReadRequest.GetItemValue(values[ii], info.LastValue, DiagnosticsMasks.All);
-                    info.LastValue.ServerTimestamp = DateTime.UtcNow;
+                    // Validate before updating cache: null+good transient values are suppressed without touching info.
+                    DataValue candidate = new DataValue();
+                    ServiceResult candidateError = ReadRequest.GetItemValue(values[ii], candidate, DiagnosticsMasks.All);
+                    candidate.ServerTimestamp = DateTime.UtcNow;
 
-                    // Some COM servers send an initial callback with a null value and GOOD quality.
-                    // Do not forward that transient state as a valid value to subscriptions.
-                    if (info.LastValue.Value == null && StatusCode.IsGood(info.LastValue.StatusCode))
+                    if (candidate.Value == null && StatusCode.IsGood(candidate.StatusCode))
                     {
                         continue;
                     }
+
+                    // For bad-quality null values, fill a type-compatible default to avoid client cast errors.
+                    if (candidate.Value == null && StatusCode.IsBad(candidate.StatusCode)
+                        && info.LastValue != null && info.LastValue.Value != null)
+                    {
+                        Type t = info.LastValue.Value.GetType();
+                        candidate.Value = t.IsValueType ? Activator.CreateInstance(t)
+                                        : (t == typeof(string) ? (object)String.Empty : null);
+                    }
+
+                    info.LastValue = candidate;
+                    info.LastError = candidateError;
 
                     // queue the values.
                     for (int jj = 0; jj < monitoredItems.Length; jj++)
@@ -329,7 +339,17 @@ namespace Opc.Ua.Com.Client
 
             missing = missingServerHandles.Count;
 
-            DaValue[] retries = SyncRead(missingServerHandles.ToArray(), missingServerHandles.Count);
+            DaValue[] retries = null;
+
+            try
+            {
+                retries = SyncRead(missingServerHandles.ToArray(), missingServerHandles.Count);
+            }
+            catch (Exception e)
+            {
+                Utils.Trace(Utils.TraceMasks.Error, "Initial callback backfill failed. Group={0}, Missing={1}: {2}", m_clientHandle, missingServerHandles.Count, e.Message);
+                return 0;
+            }
 
             if (retries == null)
             {
@@ -352,7 +372,7 @@ namespace Opc.Ua.Com.Client
                 replaced++;
             }
 
-            Utils.Trace(Utils.TraceMasks.Error, "Initial callback backfill: Group={0}, Missing={1}, Replaced={2}", m_clientHandle, missingServerHandles.Count, replaced);
+            Utils.Trace(Utils.TraceMasks.Information, "Initial callback backfill: Group={0}, Missing={1}, Replaced={2}", m_clientHandle, missingServerHandles.Count, replaced);
 
             return replaced;
         }
@@ -392,25 +412,15 @@ namespace Opc.Ua.Com.Client
                 return callbackHandles;
             }
 
-            List<int> resolved = new List<int>(expectedCount);
-
-            lock (Lock)
+            // Reconstruct handles only for single-item callbacks with exactly one candidate to avoid
+            // misattributing values to wrong tags in multi-item callbacks with missing handle arrays.
+            if (expectedCount == 1)
             {
-                for (int ii = 0; ii < m_items.Count && resolved.Count < expectedCount; ii++)
+                int candidate = Int32.MinValue;
+
+                lock (Lock)
                 {
-                    GroupItem item = m_items[ii];
-
-                    if (!item.Created || !item.Active || item.ErrorId < 0)
-                    {
-                        continue;
-                    }
-
-                    resolved.Add(item.ClientHandle);
-                }
-
-                if (resolved.Count < expectedCount)
-                {
-                    for (int ii = 0; ii < m_items.Count && resolved.Count < expectedCount; ii++)
+                    for (int ii = 0; ii < m_items.Count; ii++)
                     {
                         GroupItem item = m_items[ii];
 
@@ -419,31 +429,20 @@ namespace Opc.Ua.Com.Client
                             continue;
                         }
 
-                        if (!resolved.Contains(item.ClientHandle))
+                        if (candidate != Int32.MinValue)
                         {
-                            resolved.Add(item.ClientHandle);
+                            candidate = Int32.MinValue;
+                            break;
                         }
+
+                        candidate = item.ClientHandle;
                     }
                 }
-            }
 
-            if (resolved.Count == expectedCount)
-            {
-                return resolved.ToArray();
-            }
-
-            if (callbackHandles != null)
-            {
-                int[] padded = new int[expectedCount];
-                int copyCount = Math.Min(callbackHandles.Length, expectedCount);
-                Array.Copy(callbackHandles, padded, copyCount);
-
-                for (int ii = copyCount; ii < expectedCount; ii++)
+                if (candidate != Int32.MinValue)
                 {
-                    padded[ii] = Int32.MinValue + ii;
+                    return new int[] { candidate };
                 }
-
-                return padded;
             }
 
             int[] synthetic = new int[expectedCount];
@@ -1092,12 +1091,15 @@ namespace Opc.Ua.Com.Client
             PreloadInitialValues();
 
             // check if at least one valid item.
+            // Collect error handles outside lock to avoid holding Lock during OnDataChange → BackfillInitialNullValues.
+            int[] errorHandles = null;
+            DaValue[] errorValues = null;
+            bool result = false;
+
             lock (Lock)
             {
                 List<int> clientHandles = null;
                 List<DaValue> values = null;
-
-                bool result = false;
 
                 for (int ii = 0; ii < m_items.Count; ii++)
                 {
@@ -1121,11 +1123,17 @@ namespace Opc.Ua.Com.Client
 
                 if (clientHandles != null && clientHandles.Count > 0)
                 {
-                    OnDataChange(clientHandles.ToArray(), values.ToArray());
+                    errorHandles = clientHandles.ToArray();
+                    errorValues = values.ToArray();
                 }
-
-                return result;
             }
+
+            if (errorHandles != null)
+            {
+                OnDataChange(errorHandles, errorValues);
+            }
+
+            return result;
         }
         #endregion
 
@@ -1191,6 +1199,8 @@ namespace Opc.Ua.Com.Client
                 return;
             }
 
+            int successCount = 0;
+
             lock (m_monitoredItems)
             {
                 for (int ii = 0; ii < readResults.Length && ii < toRead.Count; ii++)
@@ -1220,6 +1230,7 @@ namespace Opc.Ua.Com.Client
                     {
                         info.LastValue = uaValue;
                         info.LastError = serviceResult;
+                        successCount++;
 
                         // Queue immediately to MonitoredItems if already linked (SetMonitoredItems runs before PreloadInitialValues).
                         if (info.MonitoredItems != null)
@@ -1233,7 +1244,7 @@ namespace Opc.Ua.Com.Client
                 }
             }
 
-            Utils.Trace(Utils.TraceMasks.Information, "PreloadInitialValues: Group={0}, Preloaded={1}/{2}", m_clientHandle, toRead.Count, m_items.Count);
+            Utils.Trace(Utils.TraceMasks.Information, "PreloadInitialValues: Group={0}, Preloaded={1}/{2}", m_clientHandle, successCount, m_items.Count);
         }
 
         /// <summary>
@@ -1368,8 +1379,8 @@ namespace Opc.Ua.Com.Client
         private List<GroupItem> m_items;
         private ComDaDataCallback m_callback;
         private Dictionary<int, DataChangeInfo> m_monitoredItems;
-        private int m_dataChangeCallbackCount;
-        private int m_initialBackfillAttempts;
+        private volatile int m_dataChangeCallbackCount;
+        private volatile int m_initialBackfillAttempts;
         #endregion
     }
 

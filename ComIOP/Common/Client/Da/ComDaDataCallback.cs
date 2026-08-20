@@ -112,6 +112,11 @@ namespace Opc.Ua.Com.Client
 
 			    if (clientHandles == null || clientHandles.Length != values.Length)
 			    {
+				    Utils.Trace(
+				        Utils.TraceMasks.Information,
+				        "OnDataChange handle mismatch: expected={0}, received={1}",
+				        values.Length,
+				        clientHandles != null ? clientHandles.Length : -1);
 				    clientHandles = m_group.ResolveCallbackClientHandles(values.Length, clientHandles);
 			    }
 

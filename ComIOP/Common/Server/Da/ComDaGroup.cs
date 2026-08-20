@@ -2821,13 +2821,24 @@ namespace Opc.Ua.Com.Server
                     }
                 }
 
+                // For IsFirstUpdate results was built from itemsToUpdate; match client handles to that ordering.
+                int[] callbackClientHandles = request.ClientHandles;
+                if (request.IsFirstUpdate && itemsToUpdate != null)
+                {
+                    callbackClientHandles = new int[itemsToUpdate.Count];
+                    for (int ii = 0; ii < itemsToUpdate.Count; ii++)
+                    {
+                        callbackClientHandles[ii] = itemsToUpdate[ii].ClientHandle;
+                    }
+                }
+
                 // send callback.
                 callback.ReadCompleted(
                     this.m_clientHandle,
                     request.IsRefresh,
                     request.CancelId,
                     request.TransactionId,
-                    request.ClientHandles,
+                    callbackClientHandles,
                     results);
 
                 TraceState("OnAsyncRead Completed", request.TransactionId, request.CancelId);
