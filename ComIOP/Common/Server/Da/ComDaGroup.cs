@@ -2808,28 +2808,33 @@ namespace Opc.Ua.Com.Server
                 // read values.
                 DaValue[] results = SyncRead(request.MaxAge, serverHandles, request.IsRefresh, null);
 
-                // update cache.
-                if (request.IsFirstUpdate)
+                // update cache and build filtered callback data, re-validating against current item state.
+                int[] callbackClientHandles = request.ClientHandles;
+                DaValue[] callbackResults = results;
+
+                if (request.IsFirstUpdate && itemsToUpdate != null)
                 {
+                    List<int> validHandles = new List<int>(itemsToUpdate.Count);
+                    List<DaValue> validResults = new List<DaValue>(itemsToUpdate.Count);
+
                     lock (m_lock)
                     {
                         for (int ii = 0; ii < itemsToUpdate.Count; ii++)
                         {
                             ComDaGroupItem item = itemsToUpdate[ii];
-                            item.LastSentValue = results[ii];
+                            ComDaGroupItem current;
+                            if (!m_itemsByHandle.TryGetValue(item.ServerHandle, out current) || !current.Active)
+                            {
+                                continue;  // removed or deactivated during SyncRead
+                            }
+                            current.LastSentValue = results[ii];
+                            validHandles.Add(current.ClientHandle);
+                            validResults.Add(results[ii]);
                         }
                     }
-                }
 
-                // For IsFirstUpdate results was built from itemsToUpdate; match client handles to that ordering.
-                int[] callbackClientHandles = request.ClientHandles;
-                if (request.IsFirstUpdate && itemsToUpdate != null)
-                {
-                    callbackClientHandles = new int[itemsToUpdate.Count];
-                    for (int ii = 0; ii < itemsToUpdate.Count; ii++)
-                    {
-                        callbackClientHandles[ii] = itemsToUpdate[ii].ClientHandle;
-                    }
+                    callbackClientHandles = validHandles.ToArray();
+                    callbackResults = validResults.ToArray();
                 }
 
                 // send callback.
@@ -2839,7 +2844,7 @@ namespace Opc.Ua.Com.Server
                     request.CancelId,
                     request.TransactionId,
                     callbackClientHandles,
-                    results);
+                    callbackResults);
 
                 TraceState("OnAsyncRead Completed", request.TransactionId, request.CancelId);
             }

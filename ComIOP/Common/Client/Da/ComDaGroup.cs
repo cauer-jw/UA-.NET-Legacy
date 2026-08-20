@@ -259,13 +259,31 @@ namespace Opc.Ua.Com.Client
                         continue;
                     }
 
-                    // For bad-quality null values, fill a type-compatible default to avoid client cast errors.
-                    if (candidate.Value == null && StatusCode.IsBad(candidate.StatusCode)
-                        && info.LastValue != null && info.LastValue.Value != null)
+                    // For any non-good null value, fill a type-compatible default; skip if no safe fallback.
+                    if (candidate.Value == null && !StatusCode.IsGood(candidate.StatusCode))
                     {
-                        Type t = info.LastValue.Value.GetType();
-                        candidate.Value = t.IsValueType ? Activator.CreateInstance(t)
-                                        : (t == typeof(string) ? (object)String.Empty : null);
+                        if (info.LastValue != null && info.LastValue.Value != null)
+                        {
+                            Type t = info.LastValue.Value.GetType();
+                            if (t.IsValueType)
+                            {
+                                candidate.Value = Activator.CreateInstance(t);
+                            }
+                            else if (t == typeof(string))
+                            {
+                                candidate.Value = String.Empty;
+                            }
+                            else if (t.IsArray)
+                            {
+                                Type elem = t.GetElementType() ?? typeof(object);
+                                candidate.Value = Array.CreateInstance(elem, new int[t.GetArrayRank()]);
+                            }
+                        }
+
+                        if (candidate.Value == null)
+                        {
+                            continue;
+                        }
                     }
 
                     info.LastValue = candidate;
@@ -306,7 +324,8 @@ namespace Opc.Ua.Com.Client
                 {
                     DaValue value = values[ii];
 
-                    if (value != null && value.Error >= 0 && value.Value != null)
+                    if (value != null && value.Error >= 0 && value.Value != null
+                        && value.Quality != OpcRcw.Da.Qualities.OPC_QUALITY_WAITING_FOR_INITIAL_DATA)
                     {
                         continue;
                     }
@@ -409,7 +428,26 @@ namespace Opc.Ua.Com.Client
 
             if (callbackHandles != null && callbackHandles.Length == expectedCount)
             {
-                return callbackHandles;
+                bool allValid = true;
+                lock (Lock)
+                {
+                    for (int hh = 0; hh < callbackHandles.Length && allValid; hh++)
+                    {
+                        bool found = false;
+                        for (int ii = 0; ii < m_items.Count; ii++)
+                        {
+                            if (m_items[ii].Created && m_items[ii].ErrorId >= 0
+                                && m_items[ii].ClientHandle == callbackHandles[hh])
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) allValid = false;
+                    }
+                }
+                if (allValid) return callbackHandles;
+                // fall through: invalid handles trigger single-item or synthetic path
             }
 
             // Reconstruct handles only for single-item callbacks with exactly one candidate to avoid
@@ -1153,21 +1191,24 @@ namespace Opc.Ua.Com.Client
 
             lock (Lock)
             {
-                for (int ii = 0; ii < m_items.Count; ii++)
+                lock (m_monitoredItems)
                 {
-                    GroupItem item = m_items[ii];
-                    if (!item.Created || item.ServerHandle == 0 || item.ErrorId < 0)
+                    for (int ii = 0; ii < m_items.Count; ii++)
                     {
-                        continue;
-                    }
+                        GroupItem item = m_items[ii];
+                        if (!item.Created || item.ServerHandle == 0 || item.ErrorId < 0)
+                        {
+                            continue;
+                        }
 
-                    DataChangeInfo info;
-                    if (m_monitoredItems.TryGetValue(item.ClientHandle, out info) && info.LastValue != null)
-                    {
-                        continue;
-                    }
+                        DataChangeInfo info;
+                        if (m_monitoredItems.TryGetValue(item.ClientHandle, out info) && info.LastValue != null)
+                        {
+                            continue;
+                        }
 
-                    toRead.Add(item);
+                        toRead.Add(item);
+                    }
                 }
             }
 
